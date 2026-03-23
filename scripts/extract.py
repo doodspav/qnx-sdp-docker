@@ -10,8 +10,6 @@ from _docker import Container, get_label
 
 ARCHITECTURES = ["aarch64", "x86_64"]
 
-MANIFESTS = ["sysroot"]
-
 
 def parse_cli() -> argparse.Namespace:
 
@@ -21,48 +19,86 @@ def parse_cli() -> argparse.Namespace:
 
     parser.add_argument(
         "-i", "--image",
-        required=True,
-        help="Image from which to extract artifacts",
+        help="image from which to extract artifacts",
     )
     parser.add_argument(
         "--show-prefix",
         action="store_true",
-        help="Print the image's QNX prefix and exit",
-    )
-    parser.add_argument(
-        "manifest",
-        nargs="?",
-        choices=MANIFESTS,
-        metavar="MANIFEST",
-        help="Manifest name whose artifacts to extract (choices: %(choices)s)",
+        help="print the image's QNX prefix and exit",
     )
     parser.add_argument(
         "-a", "--arch",
         action="append",
         choices=ARCHITECTURES,
-        help="Architecture(s) for which to extract artifacts (default: all present on the image)",
+        help="architecture(s) for which to extract artifacts (default: all present on the image)",
     )
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "-p", "--prefix",
-        help="Local destination path into which to extract artifacts",
+        help="host destination path into which to extract artifacts",
     )
     group.add_argument(
         "-m", "--mirror",
         action="store_true",
-        help="Extract artifacts to the same path as in the image",
+        help="extract artifacts to the same path as in the image",
     )
 
-    args = parser.parse_args()
+    subparsers = parser.add_subparsers(dest="manifest", metavar="MANIFEST")
+
+    sysroot = subparsers.add_parser(
+        "sysroot",
+        help="extract sysroot artifacts",
+        description="If no component flags are set, all components will be extracted."
+    )
+    sysroot.add_argument(
+        "--headers",
+        dest="sysroot_headers",
+        action="store_true",
+        help="extract headers from the sysroot",
+    )
+    sysroot.add_argument(
+        "--runtime",
+        dest="sysroot_runtime",
+        action="store_true",
+        help="extract runtime libraries from the sysroot",
+    )
+    sysroot.add_argument(
+        "--static",
+        dest="sysroot_static",
+        action="store_true",
+        help="extract static files (e.g., .a, .link, .o) from the sysroot",
+    )
+
+    args, remaining = parser.parse_known_args()
+    if remaining:
+        args = parser.parse_args(remaining, namespace=args)
+
+    if not args.image:
+        parser.error("the following arguments are required: -i/--image")
 
     if not args.show_prefix:
         if not args.manifest:
-            parser.error("the positional argument MANIFEST is required")
+            parser.error("a MANIFEST subcommand is required")
         if not args.prefix and not args.mirror:
             parser.error("one of the following arguments are required: -p/--prefix, -m/--mirror")
 
     return args
+
+
+def parse_manifest_names(args: argparse.Namespace) -> List[str]:
+    """
+    Parses the cli arguments to decide which manifest files need to be read.
+    """
+    opts = { k: v for k, v in vars(args).items() if k.startswith(f"{args.manifest}_") }
+    opts = { k.removeprefix(f"{args.manifest}_"): v for k, v in opts.items() }
+
+    # no flags set means return default, which is the root manifest
+    if not any(opts.values()):
+        return [args.manifest]
+
+    # if flags are set, only return those manifests
+    return [f"{args.manifest}.{k}" for k, v in opts.items() if v]
 
 
 def get_image_prefix(image: str, arch: str) -> Optional[Path]:
@@ -93,7 +129,7 @@ def read_manifest_file(container: Container, path: Path) -> List[Path]:
         if s:
             paths.append(Path(s))
 
-    if len(paths) == 0:
+    if not paths:
         raise RuntimeError(f"The manifest file is empty: {path}")
     return paths
 
@@ -143,7 +179,7 @@ def main() -> None:
     for a in ARCHITECTURES:
         if (p := get_image_prefix(image=args.image, arch=a)) is not None:
             supported_archs[a] = p
-    if len(supported_archs) == 0:
+    if not supported_archs:
         raise ValueError(f"No supported architectures found for image '{args.image}'")
 
     # set up requested architectures (default is any supported)
@@ -157,7 +193,7 @@ def main() -> None:
     requested_archs: Dict[str, Path] = {
         a: supported_archs[a] for a in args.arch
     }
-    if len(requested_archs) == 0:
+    if not requested_archs:
         requested_archs = supported_archs
 
     # print prefixes if that's all we care about
@@ -171,8 +207,9 @@ def main() -> None:
         # get manifest files
         manifest_files: Dict[str, List[Path]] = {}
         for a, p in requested_archs.items():
-            m = p / ".manifests" / f"{args.manifest}.{a}"
-            manifest_files[a] = read_manifest_file(container=c, path=m)
+            for name in parse_manifest_names(args):
+                m = p / ".manifests" / f"{name}.{a}"
+                manifest_files[a] = read_manifest_file(container=c, path=m)
 
         # copy files
         for a, paths in manifest_files.items():
