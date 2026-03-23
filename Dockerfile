@@ -9,6 +9,10 @@ ARG QNX_SDP_ROOT="sdp/qnx800"
 ARG QNX_VER="8.0.0"
 ARG GCC_VER="12.2.0"
 
+# labels
+LABEL qnx.prefix.aarch64="/sysroot/aarch64"
+LABEL qnx.prefix.x86_64="/sysroot/x86_64"
+
 # generic target header files
 COPY "${QNX_SDP_ROOT}/target/qnx/usr/include/" "/sysroot/aarch64/target/qnx/usr/include/"
 COPY "${QNX_SDP_ROOT}/target/qnx/usr/include/" "/sysroot/x86_64/target/qnx/usr/include/"
@@ -62,10 +66,28 @@ RUN set -eux; \
     find '/sysroot' -type d -empty -delete; \
     :
 
+# create manifest files
+RUN set -eux; \
+    mkdir -p "/sysroot/aarch64/.manifests"; \
+    cd "/sysroot/aarch64";                  \
+    {                                       \
+        find "." -not -path "./.manifests" -not -path "./.manifests/*" -type f | sort; \
+        find "." -not -path "./.manifests" -not -path "./.manifests/*" -type l | sort; \
+    } | sed "s|^\./||" > ".manifests/sysroot.aarch64";                                 \
+    mkdir -p "/sysroot/x86_64/.manifests"; \
+    cd "/sysroot/x86_64";                  \
+    {                                      \
+        find "." -not -path "./.manifests" -not -path "./.manifests/*" -type f | sort; \
+        find "." -not -path "./.manifests" -not -path "./.manifests/*" -type l | sort; \
+    } | sed "s|^\./||" > ".manifests/sysroot.x86_64";                                  \
+    :
+
 
 FROM scratch AS aarch64-sysroot
 
 ARG QNX_PREFIX="/opt/qnx/qnx800"
+
+LABEL qnx.prefix.aarch64="${QNX_PREFIX}"
 
 COPY --from=base-sysroot "/sysroot/aarch64/" "${QNX_PREFIX}/"
 
@@ -74,12 +96,17 @@ FROM scratch AS x86_64-sysroot
 
 ARG QNX_PREFIX="/opt/qnx/qnx800"
 
+LABEL qnx.prefix.x86_64="${QNX_PREFIX}"
+
 COPY --from=base-sysroot "/sysroot/x86_64/" "${QNX_PREFIX}/"
 
 
 FROM scratch AS sysroot
 
 ARG QNX_PREFIX="/opt/qnx/qnx800"
+
+LABEL qnx.prefix.aarch64="${QNX_PREFIX}"
+LABEL qnx.prefix.x86_64="${QNX_PREFIX}"
 
 COPY --from=base-sysroot "/sysroot/aarch64/" "${QNX_PREFIX}/"
 COPY --from=base-sysroot "/sysroot/x86_64/"  "${QNX_PREFIX}/"
