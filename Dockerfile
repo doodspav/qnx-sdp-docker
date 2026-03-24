@@ -188,9 +188,11 @@ RUN set -eux; \
     :
 
 
-FROM scratch AS internal-aarch64-toolchain-core
+FROM --platform=${_QNX_HOST_PLATFORM} busybox:glibc AS internal-aarch64-toolchain-core
 
 ARG QNX_PREFIX="/opt/qnx/qnx800"
+
+RUN ln -s "/lib/libc.so.6" "/lib/libdl.so.2"
 
 COPY --from=internal-toolchain-base "/q/toolchain/core/aarch64/" "${QNX_PREFIX}/"
 
@@ -201,9 +203,11 @@ ENV QNX_TARGET="${QNX_PREFIX}/target/qnx"
 ENV QNX_HOST="${QNX_PREFIX}/host/linux/x86_64"
 
 
-FROM scratch AS internal-x86_64-toolchain-core
+FROM --platform=${_QNX_HOST_PLATFORM} busybox:glibc AS internal-x86_64-toolchain-core
 
 ARG QNX_PREFIX="/opt/qnx/qnx800"
+
+RUN ln -s "/lib/libc.so.6" "/lib/libdl.so.2"
 
 COPY --from=internal-toolchain-base "/q/toolchain/core/x86_64/" "${QNX_PREFIX}/"
 
@@ -214,9 +218,11 @@ ENV QNX_TARGET="${QNX_PREFIX}/target/qnx"
 ENV QNX_HOST="${QNX_PREFIX}/host/linux/x86_64"
 
 
-FROM scratch AS internal-toolchain-core
+FROM --platform=${_QNX_HOST_PLATFORM} busybox:glibc AS internal-toolchain-core
 
 ARG QNX_PREFIX="/opt/qnx/qnx800"
+
+RUN ln -s "/lib/libc.so.6" "/lib/libdl.so.2"
 
 COPY --from=internal-toolchain-base "/q/toolchain/core/aarch64/" "${QNX_PREFIX}/"
 COPY --from=internal-toolchain-base "/q/toolchain/core/x86_64/"  "${QNX_PREFIX}/"
