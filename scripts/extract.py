@@ -1,4 +1,5 @@
 import argparse
+import json
 import shutil
 import tempfile
 
@@ -22,9 +23,19 @@ def parse_cli() -> argparse.Namespace:
         help="image from which to extract artifacts",
     )
     parser.add_argument(
-        "--show-prefix",
+        "--show-prefixes",
         action="store_true",
-        help="print the image's QNX prefix and exit",
+        help="print the image's QNX prefix for each supported architecture and exit",
+    )
+    parser.add_argument(
+        "--show-manifests",
+        action="store_true",
+        help="print the image's manifest file names for each supported architecture and exit",
+    )
+    parser.add_argument(
+        "--show-archs",
+        action="store_true",
+        help="print the image's supported architectures and exit",
     )
     parser.add_argument(
         "-a", "--arch",
@@ -77,28 +88,13 @@ def parse_cli() -> argparse.Namespace:
     if not args.image:
         parser.error("the following arguments are required: -i/--image")
 
-    if not args.show_prefix:
+    if not any((args.show_prefixes, args.show_archs, args.show_manifests)):
         if not args.manifest:
             parser.error("a MANIFEST subcommand is required")
         if not args.prefix and not args.mirror:
             parser.error("one of the following arguments are required: -p/--prefix, -m/--mirror")
 
     return args
-
-
-def parse_manifest_names(args: argparse.Namespace) -> List[str]:
-    """
-    Parses the cli arguments to decide which manifest files need to be read.
-    """
-    opts = { k: v for k, v in vars(args).items() if k.startswith(f"{args.manifest}_") }
-    opts = { k.removeprefix(f"{args.manifest}_"): v for k, v in opts.items() }
-
-    # no flags set means return default, which is the root manifest
-    if not any(opts.values()):
-        return [args.manifest]
-
-    # if flags are set, only return those manifests
-    return [f"{args.manifest}.{k}" for k, v in opts.items() if v]
 
 
 def get_image_prefix(image: str, arch: str) -> Optional[Path]:
@@ -108,6 +104,42 @@ def get_image_prefix(image: str, arch: str) -> Optional[Path]:
     label = f"qnx.prefix.{arch}"
     prefix = get_label(image=image, label=label)
     return Path(prefix) if prefix else None
+
+
+def parse_manifest_names(args: argparse.Namespace) -> List[str]:
+    """
+    Parses the cli arguments to decide which manifest files need to be read.
+    """
+    opts = { k: v for k, v in vars(args).items() if k.startswith(f"{args.manifest}_") }
+    opts = { k.removeprefix(f"{args.manifest}_"): v for k, v in opts.items() }
+
+    # no flags set means return default, which is all the manifests
+    if not any(opts.values()):
+        return [f"{args.manifest}.{k}" for k in opts.keys()]
+
+    # if flags are set, only return those manifests
+    return [f"{args.manifest}.{k}" for k, v in opts.items() if v]
+
+
+def get_image_manifest_names(
+    container: Container, arch_prefixes: Dict[str, Path]
+) -> Dict[str, List[str]]:
+    """
+    Gets the manifest file names for the given architecture from the image if present.
+    """
+    extractable_manifests = [
+        "sysroot.headers",
+        "sysroot.runtime",
+        "sysroot.static",
+    ]
+    arch_to_names: Dict[str, List[str]] = {}
+    for a, p in arch_prefixes.items():
+        path = str(p / ".manifests")
+        if (names := container.list_dir_with_cp(path)) is not None:
+            names = [n.removesuffix(f".{a}") for n in names if n.endswith(f".{a}")]
+            names = [n for n in names if n in extractable_manifests]
+            arch_to_names[a] = names
+    return arch_to_names
 
 
 def read_manifest_file(container: Container, path: Path) -> List[Path]:
@@ -179,13 +211,19 @@ def main() -> None:
     for a in ARCHITECTURES:
         if (p := get_image_prefix(image=args.image, arch=a)) is not None:
             supported_archs[a] = p
+    if args.show_archs:
+        print(json.dumps(list(supported_archs.keys())))
+        return
+    if args.show_prefixes:
+        print(json.dumps({ k: str(v) for k, v in supported_archs.items()}))
+        return
     if not supported_archs:
         raise ValueError(f"No supported architectures found for image '{args.image}'")
 
     # set up requested architectures (default is any supported)
     args.arch = [] if args.arch is None else list(args.arch)
     unsupported_archs = set(args.arch) - set(supported_archs.keys())
-    if unsupported_archs:
+    if unsupported_archs and not args.show_manifests:
         raise ValueError(
             f"Unsupported architecture(s) requested for image "
             f"'{args.image}': {', '.join(unsupported_archs)}"
@@ -196,23 +234,29 @@ def main() -> None:
     if not requested_archs:
         requested_archs = supported_archs
 
-    # print prefixes if that's all we care about
-    if args.show_prefix:
-        for a, p in requested_archs.items():
-            print(f"{a}: {p}")
-        return
-
     with Container(image=args.image) as c:
 
-        # get manifest files
-        manifest_files: Dict[str, List[Path]] = {}
+        # get supported manifest files
+        supported_manifest_names: Dict[str, List[str]] = \
+            get_image_manifest_names(container=c, arch_prefixes=supported_archs)
+        if args.show_manifests:
+            print(json.dumps(supported_manifest_names))
+            return
+
+        # parse requested manifest files
+        manifest_paths: Dict[str, List[Path]] = {}
         for a, p in requested_archs.items():
             for name in parse_manifest_names(args):
+                if name not in supported_manifest_names[a]:
+                    raise ValueError(
+                        f"Manifest name '{name}' not available for "
+                        f"architecture '{a}' on image '{args.image}'"
+                    )
                 m = p / ".manifests" / f"{name}.{a}"
-                manifest_files[a] = read_manifest_file(container=c, path=m)
+                manifest_paths[a] = read_manifest_file(container=c, path=m)
 
         # copy files
-        for a, paths in manifest_files.items():
+        for a, paths in manifest_paths.items():
             image_prefix = requested_archs[a]
             host_prefix = image_prefix if args.mirror else Path(args.prefix)
             extract_files(

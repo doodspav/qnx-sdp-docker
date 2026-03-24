@@ -4,7 +4,7 @@ import sys
 import tarfile
 
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 
 def get_label(image: str, label: str) -> Optional[str]:
@@ -94,6 +94,39 @@ class Container:
             )
         else:
             self._id = None
+
+    def list_dir_with_cp(self, path: str) -> Optional[List[str]]:
+        """
+        Lists the non-recursive contents of a directory if it is accessible and
+        returns the relative file names. Excludes "." and "..".
+
+        This is implemented using cp, so it will copy the entire directory.
+        This may be expensive and unwanted for large directories or files.
+        """
+        container_id = self._get_id_or_raise()
+        result = subprocess.run(
+            ["docker", "cp", f"{container_id}:{path}", "-"],
+            capture_output=True,
+        )
+
+        if result.returncode != 0:
+            if str(path).encode() in result.stderr:
+                return None
+            raise RuntimeError(
+                f"Failed to list files from container directory '{path}': "
+                f"{result.stderr.strip()}"
+            )
+
+        t = tarfile.open(fileobj=io.BytesIO(result.stdout))
+        members = t.getmembers()
+        if not members[0].isdir():
+            raise RuntimeError(
+                f"Expected a directory but got a file: {path}"
+            )
+        return [
+            m.name.split("/", 1)[1]  # dirname/filename, strip leading dir
+            for m in members if m.name and m.name.count("/") == 1
+        ]
 
     def read_file(self, path: str) -> Optional[bytes]:
         """
