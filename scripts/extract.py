@@ -1,15 +1,49 @@
 import argparse
 import json
+import os
 import shutil
+import stat
+import sys
 import tempfile
 
 from pathlib import Path
+from string import Template
 from typing import Dict, List, Optional
 
 from _docker import Container, get_label
 
 
 ARCHITECTURES = ["aarch64", "x86_64"]
+
+
+AVAILABLE_MANIFESTS = [
+    *[f"sysroot.{s}" for s in ["headers", "runtime", "static"]],
+    *[f"toolchain.{t}" for t in ["cc"]],
+]
+
+
+TOOL_TEMPLATE_SH = Template("""\
+#!/bin/sh
+: "$${QNX_DOCKER:?QNX_DOCKER is not set}"
+: "$${QNX_CONTAINER_${manifest}:?QNX_CONTAINER_${manifest} is not set}"
+
+exec "$$QNX_DOCKER" exec -w "$$(pwd)" "$$QNX_CONTAINER_${manifest}" ${binary} "$$@"
+""")
+
+
+TOOL_TEMPLATE_CMD = Template("""\
+@echo off
+if not defined QNX_DOCKER (
+    >&2 echo ERROR: QNX_DOCKER is not set
+    exit /b 1
+)
+if not defined QNX_CONTAINER_${manifest} (
+    >&2 echo ERROR: QNX_CONTAINER_${manifest} is not set
+    exit /b 1
+)
+
+%QNX_DOCKER% exec -w "%cd%" %QNX_CONTAINER_${manifest}% %*
+""")
 
 
 def parse_cli() -> argparse.Namespace:
@@ -81,6 +115,18 @@ def parse_cli() -> argparse.Namespace:
         help="extract static files (e.g., .a, .link, .o) from the sysroot",
     )
 
+    toolchain = subparsers.add_parser(
+        "toolchain",
+        help="create wrapper scripts for toolchain binaries",
+        description="If no component flags are set, all components will be wrapped.",
+    )
+    toolchain.add_argument(
+        "--cc",
+        dest="toolchain_cc",
+        action="store_true",
+        help="create wrapper scripts for compiler (and related) binaries",
+    )
+
     args, remaining = parser.parse_known_args()
     if remaining:
         args = parser.parse_args(remaining, namespace=args)
@@ -100,15 +146,20 @@ def parse_cli() -> argparse.Namespace:
 def get_image_prefix(image: str, arch: str) -> Optional[Path]:
     """
     Gets the QNX prefix for the given architecture from the image if present.
+
+    Prefixes are returned as an absolute path.
     """
     label = f"qnx.prefix.{arch}"
     prefix = get_label(image=image, label=label)
     return Path(prefix) if prefix else None
 
 
-def parse_manifest_names(args: argparse.Namespace) -> List[str]:
+def parse_cli_manifest_names(args: argparse.Namespace) -> List[str]:
     """
     Parses the cli arguments to decide which manifest files need to be read.
+
+    Manifest names are returned in the form of "{group}.{sub}" without the
+    architecture.
     """
     opts = { k: v for k, v in vars(args).items() if k.startswith(f"{args.manifest}_") }
     opts = { k.removeprefix(f"{args.manifest}_"): v for k, v in opts.items() }
@@ -122,22 +173,21 @@ def parse_manifest_names(args: argparse.Namespace) -> List[str]:
 
 
 def get_image_manifest_names(
-    container: Container, arch_prefixes: Dict[str, Path]
+    container: Container, arch_to_prefix: Dict[str, Path]
 ) -> Dict[str, List[str]]:
     """
-    Gets the manifest file names for the given architecture from the image if present.
+    Gets the manifest file names for the given architecture from the image if
+    present.
+
+    Manifest names are returned in the form of "{group}.{sub}" without the
+    architecture.
     """
-    extractable_manifests = [
-        "sysroot.headers",
-        "sysroot.runtime",
-        "sysroot.static",
-    ]
     arch_to_names: Dict[str, List[str]] = {}
-    for a, p in arch_prefixes.items():
+    for a, p in arch_to_prefix.items():
         path = str(p / ".manifests")
         if (names := container.list_dir_with_cp(path)) is not None:
             names = [n.removesuffix(f".{a}") for n in names if n.endswith(f".{a}")]
-            names = [n for n in names if n in extractable_manifests]
+            names = [n for n in names if n in AVAILABLE_MANIFESTS]
             arch_to_names[a] = names
     return arch_to_names
 
@@ -188,7 +238,6 @@ def extract_files(
             dst_f.parent.mkdir(parents=True, exist_ok=True)
 
             if not tmp_f.exists():
-                print(tmp_f)
                 raise RuntimeError(
                     f"The file does not exist in the image: {img_dir / f}"
                 )
@@ -199,6 +248,33 @@ def extract_files(
                 dst_f.symlink_to(tmp_f.readlink())
             else:
                 shutil.copy2(tmp_f, dst_f)
+
+
+def wrap_tools(dst_dir: Path, binary_names: List[str], manifest_name: str) -> None:
+    """
+    Creates wrapper scripts in the destination path for all given binary names.
+    """
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    manifest = manifest_name.replace('.', '_').upper()
+
+    is_windows = sys.platform == "win32"
+    ext = ".cmd" if is_windows else ""
+    template = TOOL_TEMPLATE_CMD if is_windows else TOOL_TEMPLATE_SH
+    newline = "\r\n" if is_windows else "\n"
+
+    for bn in binary_names:
+
+        filepath = dst_dir / f"{bn}{ext}"
+        content = template.substitute(binary=bn, manifest=manifest)
+
+        with open(filepath, "w", newline=newline) as f:
+            f.write(content)
+
+        if not is_windows:
+            filename = str(filepath)
+            st = os.stat(filename)
+            x_bit = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+            os.chmod(filename, st.st_mode | x_bit)
 
 
 def main() -> None:
@@ -238,7 +314,7 @@ def main() -> None:
 
         # get supported manifest files
         supported_manifest_names: Dict[str, List[str]] = \
-            get_image_manifest_names(container=c, arch_prefixes=supported_archs)
+            get_image_manifest_names(container=c, arch_to_prefix=supported_archs)
         if args.show_manifests:
             print(json.dumps(supported_manifest_names))
             return
@@ -246,25 +322,44 @@ def main() -> None:
         # parse requested manifest files
         manifest_paths: Dict[str, List[Path]] = {}
         for a, p in requested_archs.items():
-            for name in parse_manifest_names(args):
-                if name not in supported_manifest_names[a]:
+            for name in parse_cli_manifest_names(args):
+                if name not in supported_manifest_names.get(a, []):
                     raise ValueError(
                         f"Manifest name '{name}' not available for "
                         f"architecture '{a}' on image '{args.image}'"
                     )
                 m = p / ".manifests" / f"{name}.{a}"
-                manifest_paths[a] = read_manifest_file(container=c, path=m)
+                manifest_paths.setdefault(a, [])
+                manifest_paths[a] += read_manifest_file(container=c, path=m)
 
-        # copy files
-        for a, paths in manifest_paths.items():
-            image_prefix = requested_archs[a]
-            host_prefix = image_prefix if args.mirror else Path(args.prefix)
-            extract_files(
-                container=c,
-                img_dir=image_prefix,
-                dst_dir=host_prefix,
-                files=paths
-            )
+        if args.manifest == "sysroot":
+
+            # copy files
+            for a, paths in manifest_paths.items():
+                image_prefix = requested_archs[a]
+                host_prefix = image_prefix if args.mirror else Path(args.prefix)
+                extract_files(
+                    container=c,
+                    img_dir=image_prefix,
+                    dst_dir=host_prefix,
+                    files=paths
+                )
+
+        elif args.manifest == "toolchain":
+
+            # create wrapper scripts
+            for a, paths in manifest_paths.items():
+                image_prefix = requested_archs[a]
+                host_prefix = image_prefix if args.mirror else Path(args.prefix)
+                names = [p.name for p in paths]
+                wrap_tools(
+                    dst_dir=host_prefix,
+                    binary_names=names,
+                    manifest_name="toolchain"
+                )
+
+        else:
+            raise ValueError(f"Unknown manifest '{args.manifest}'")
 
 
 if __name__ == "__main__":
