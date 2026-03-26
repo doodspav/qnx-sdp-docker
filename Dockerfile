@@ -39,7 +39,7 @@ RUN set -eux; \
            '/q/sysroot/aarch64/target/qnx/aarch64le/usr/lib/python3.11' \
            '/q/sysroot/x86_64/target/qnx/x86_64/lib/dll'                \
            '/q/sysroot/x86_64/target/qnx/x86_64/usr/lib/python3.11';    \
-    find '/q/sysroot' -not -path '*/include/*' \(  \
+    find '/q/sysroot' -not -path '*/include/*' \( \
         -name '*.sym'  -o \
         -name '*.py'   -o \
         -name '*.json' -o \
@@ -50,8 +50,8 @@ RUN set -eux; \
         -name '*.css'  -o \
         -name '*.supp'    \
     \) -delete; \
-    find '/q/sysroot' -path '*/usr/lib/valgrind/*' -type f -not -name '*.*' -delete; \
-    find '/q/sysroot' -type d -empty -delete; \
+    find '/q/sysroot' -type f -not -name '*.*' -delete; \
+    find '/q/sysroot' -type d -empty -delete;           \
     :
 
 # create manifest files

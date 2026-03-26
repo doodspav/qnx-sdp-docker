@@ -7,20 +7,23 @@ from pathlib import Path
 from typing import List, Optional
 
 
-def get_label(image: str, label: str) -> Optional[str]:
+def get_label(target: str, label: str) -> Optional[str]:
     """
-    Gets the value of a label from the given image.
+    Gets the value of a label from the given image or container if it is set.
     """
+    if '"' in label:
+        raise ValueError(f"Label cannot contain double quotes: {label!r}")
+
     formatted_label = f'{{{{index .Config.Labels "{label}"}}}}'
     result = subprocess.run(
-        ["docker", "inspect", "--format", formatted_label, image],
+        ["docker", "inspect", "--format", formatted_label, target],
         capture_output=True,
         text=True,
     )
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"Failed to inspect image '{image}': {result.stderr.strip()}"
+            f"Failed to inspect '{target}': {result.stderr.strip()}"
         )
     value = result.stdout.strip()
     return value if value else None
@@ -45,7 +48,7 @@ class Container:
         self.remove()
 
     def create(self) -> None:
-        """"
+        """
         Creates the container if it doesn't exist.
         """
         if self._id is not None:
@@ -73,6 +76,14 @@ class Container:
             raise RuntimeError("Container has not been created")
         return self._id
 
+    @property
+    def cid(self) -> str:
+        return self._get_id_or_raise()
+
+    @property
+    def image(self) -> str:
+        return self._image
+
     def remove(self) -> None:
         """
         Removes the container if it exists.
@@ -95,7 +106,7 @@ class Container:
         else:
             self._id = None
 
-    def list_dir_with_cp(self, path: str) -> Optional[List[str]]:
+    def listdir_with_cp(self, path: str) -> Optional[List[str]]:
         """
         Lists the non-recursive contents of a directory if it is accessible and
         returns the relative file names. Excludes "." and "..".
